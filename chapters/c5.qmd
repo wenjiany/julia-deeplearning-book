@@ -1,0 +1,169 @@
+# Chapter 5: Pet breeds
+
+```{julia}
+#| echo: false
+#| output: false
+
+using Pkg;
+Pkg.activate(".");
+
+# Packages
+using DataFrames
+using Flux
+using Images
+using Measures
+using MLDatasets
+using MLUtils
+using OneHotArrays
+using Plots
+using Statistics
+using HTTP
+using CodecZlib
+
+import UnicodePlots
+import Tar
+
+# File paths:
+www_path = "www"
+data_path = "data"
+
+```
+
+## Image Classification
+
+Download data (script from tjburch)
+
+```{julia}
+
+using Downloads
+
+function extract_tar(filename::String, output_folder::String)
+    println("Extracting...")
+    open(filename) do file
+        stream = GzipDecompressorStream(file)
+        Tar.extract(stream, output_folder)
+    end
+end
+
+function load_images(folder::String)
+    images = []
+    for file in readdir(folder)
+        if occursin(".jpg", file)
+            path = joinpath(folder, file)
+            push!(images, load(path))
+        end
+    end
+    return images
+end
+
+output_folder = join(data_path, "pets")
+
+# Ensure the output folder exists
+if !isdir(output_folder)
+    mkdir(output_folder)
+end
+
+tar_filename = joinpath(data_path, "downloaded_file.tar")
+
+url = "https://s3.amazonaws.com/fast-ai-imageclas/oxford-iiit-pet.tgz"
+
+# Download the tarball if it doesn't exist
+if !isfile(tar_filename)
+    Downloads.download(url, tar_filename)
+else
+    println("$tar_filename already exists. Skipping download.")
+end
+
+# Extract tarball
+extract_tar(tar_filename, output_folder)
+
+img_path = joinpath(output_folder, "oxford-iiit-pet", "images")
+
+# Load images
+images = load_images(img_path)
+
+println("Loaded $(length(images)) images.")
+
+
+```
+
+```{julia}
+#| output: false
+#| eval: false
+
+files = readdir(img_path)
+
+```
+
+
+```{julia}
+fname = readdir(img_path)[1]
+
+```
+
+```{julia}
+
+findall(str->occursin(r"(.+)_\d+.jpg$", str), files)  ## will find the location indices
+
+filter(str->occursin(r"(.+)_\d+.jpg$", str), files) ## will return the matching values
+
+```
+
+Define DataBlock. Probably should be it's own file or module.
+
+```{julia}
+
+struct DataBlock
+    blocks
+    get_items
+    splitter
+    get_y
+    item_tfms
+    batch_tfms
+end
+
+struct ImageBlock <: DataBlock
+end 
+
+struct CategoryBlock <: DataBlock
+end
+
+function get_image_files(path::String)
+    files = readdir(path)
+    return filter(str->occursin(r"(.+)_\d+.jpg$", str), files)
+end
+
+function = randmSplitter(seed)
+    function _split(items, train, valid)
+        return train, valid
+    end
+    return _split
+end
+
+function regexLabeller(r::String)
+    function _inner(o)
+        return findall(r, o)[1]
+    end
+    return _inner
+end
+
+function dataloader()
+end
+
+Flux.DataLoader()
+
+```
+
+```{julia}
+
+
+pets = DataBlock(blocks = (ImageBlock, CategoryBlock),
+                 get_items=get_image_files, 
+                 splitter=RandomSplitter(seed=42),
+                 get_y=using_attr(RegexLabeller(r'(.+)_\d+.jpg$'), 'name'),
+                 item_tfms=Resize(460),
+                 batch_tfms=aug_transforms(size=224, min_scale=0.75))
+
+dls = pets.dataloaders(path/"images")
+
+```
