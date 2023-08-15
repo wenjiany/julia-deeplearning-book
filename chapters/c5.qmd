@@ -17,8 +17,8 @@ using MLUtils
 using OneHotArrays
 using Plots
 using Statistics
-using HTTP
 using CodecZlib
+using Downloads
 
 import UnicodePlots
 import Tar
@@ -35,8 +35,6 @@ Download data (script from tjburch)
 
 ```{julia}
 
-using Downloads
-
 function extract_tar(filename::String, output_folder::String)
     println("Extracting...")
     open(filename) do file
@@ -45,18 +43,7 @@ function extract_tar(filename::String, output_folder::String)
     end
 end
 
-function load_images(folder::String)
-    images = []
-    for file in readdir(folder)
-        if occursin(".jpg", file)
-            path = joinpath(folder, file)
-            push!(images, load(path))
-        end
-    end
-    return images
-end
-
-output_folder = join(data_path, "pets")
+output_folder = joinpath(data_path, "pets")
 
 # Ensure the output folder exists
 if !isdir(output_folder)
@@ -75,15 +62,16 @@ else
 end
 
 # Extract tarball
-extract_tar(tar_filename, output_folder)
 
 img_path = joinpath(output_folder, "oxford-iiit-pet", "images")
 
-# Load images
-images = load_images(img_path)
+files = readdir(img_path)
 
-println("Loaded $(length(images)) images.")
-
+if length(files) == 0
+    extract_tar(tar_filename, output_folder)
+else
+    println("Images already extracted. Skipping extraction.")
+end
 
 ```
 
@@ -99,71 +87,309 @@ files = readdir(img_path)
 ```{julia}
 fname = readdir(img_path)[1]
 
+image = load(joinpath(img_path, fname))
+
+
 ```
 
 ```{julia}
 
-findall(str->occursin(r"(.+)_\d+.jpg$", str), files)  ## will find the location indices
+findall(str -> occursin(r"(.+)_\d+.jpg$", str), files)  ## will find the location indices
 
-filter(str->occursin(r"(.+)_\d+.jpg$", str), files) ## will return the matching values
+filter(str -> occursin(r"(.+)_\d+.jpg$", str), files) ## will return the matching values
 
 ```
 
-Define DataBlock. Probably should be it's own file or module.
+```{julia}
+#| eval: false
+
+# Load all images
+function load_images(folder::String)
+    images = []
+    for file in readdir(folder)
+        if occursin(".jpg", file)
+            path = joinpath(folder, file)
+            push!(images, load(path))
+        end
+    end
+    return images
+end
+
+images = load_images(img_path)
+
+println("Loaded $(length(images)) images.")
+
+```
+
+Grizzly bear example
 
 ```{julia}
 
-struct DataBlock
-    blocks
-    get_items
-    splitter
-    get_y
-    item_tfms
-    batch_tfms
+image = load(Downloads.download("https://github.com/fastai/fastbook/blob/master/images/grizzly.jpg?raw=true"))
+
+```
+
+
+```{julia}
+typeof(image)
+
+channelview(image)
+
+size(channelview(image))
+
+red.(image) * 255
+green.(image) * 255
+blue.(image) * 255
+
+```
+
+Image augmentation
+
+```{julia}
+
+# x1 = x1.affine_coord(sz=224)
+# x1 = x1.rotate(draw=30, p=1.)
+# x1 = x1.zoom(draw=1.2, p=1.)
+# x1 = x1.warp(draw_x=-0.2, draw_y=0.2, p=1.)
+
+using Augmentor
+
+pl = Resize(460, 460) |>
+     Rotate(-30)  |>
+     Zoom(1.8) |>
+     Resize(224, 224)
+
+img_new = augment(image, pl)
+
+
+```
+
+```{julia}
+#| eval: false
+
+## implimnetation of prospective warp
+## not working yet...
+using StaticArrays, CoordinateTransformations
+
+M = @SMatrix [1 0 0; 0 1 0; -1/1000 0 1] 
+
+tform = PerspectiveMap() ∘ inv(LinearMap(M))
+
+push1(x) = push(x, 1)
+
+tform2 = PerspectiveMap() ∘ inv(LinearMap(M)) ∘ push1
+
+tform2(@SVector([1,1]))
+
+imgw = warp(image, tform2, Images.indices_spatial(image)); 
+hcat(image, imgw)
+
+```
+Define DataBlock type
+
+```{julia}
+
+## not working yet...
+
+### python
+## pets = DataBlock(blocks = (ImageBlock, CategoryBlock),
+##                  get_items=get_image_files, 
+##                  splitter=RandomSplitter(seed=42),
+##                  get_y=using_attr(RegexLabeller(r'(.+)_\d+.jpg$'), 'name'),
+##                  item_tfms=Resize(460),
+##                  batch_tfms=aug_transforms(size=224, min_scale=0.75))
+
+
+## create an alias for Matrix{RGB{N0f8}} as ImgMatrix
+const ImgMatrix = typeof(image)
+
+struct TransformBlock{T}
+    item::T
 end
 
-struct ImageBlock <: DataBlock
-end 
+imgBlock = TransformBlock{ImgMatrix}(image)
 
-struct CategoryBlock <: DataBlock
+struct DataBlock{T,U}
+    inputBlocks::Vector{TransformBlock{T}}
+    outputBlocks::Vector{TransformBlock{U}}
 end
+
 
 function get_image_files(path::String)
     files = readdir(path)
-    return filter(str->occursin(r"(.+)_\d+.jpg$", str), files)
+    return filter(str -> occursin(r"(.+)_\d+.jpg$", str), files)
 end
 
-function = randmSplitter(seed)
-    function _split(items, train, valid)
-        return train, valid
-    end
-    return _split
-end
+image_files = get_image_files(img_path)
 
-function regexLabeller(r::String)
-    function _inner(o)
-        return findall(r, o)[1]
+function regexLabeller(r::Regex)
+    function _inner(o::String)
+        return match(r, o)[1]
     end
     return _inner
 end
 
-function dataloader()
+breedLabeller = regexLabeller(r"(.+)_\d+.jpg$")
+
+image_names  = breedLabeller.(image_files)
+## image_names = [match(r"^(.+)_\d+.jpg$", x)[1] for x in image_files]
+
+data = DataBlock{ImgMatrix, String}(imgBlock, TransformBlock{String}(image_names))
+
+## return two DataBlocks, training and validation
+## todo
+function randmSplitter(db::DataBlock, seed)
+
+    x = db.inputBlocks
+    y = db.outputBlocks
+    
+    function _split()
+        i_train, i_val = [], []
+        for (k, v) in group_indices(y)
+            _i_train, _i_val = splitobs(v, at=0.7)
+            push!(i_train, _i_train...)
+            push!(i_val, _i_val...)
+        end
+        Xtrain, ytrain = X[:, :, i_train], y_enc[:, i_train]
+        Xval, yval = X[:, :, i_val], y_enc[:, i_val]
+
+        return Xtrain, ytrain, Xval, yval
+    end
+    return _split
 end
 
-Flux.DataLoader()
 
 ```
+
 
 ```{julia}
 
+pets = DataBlock(imgBlock, catBlock)
 
-pets = DataBlock(blocks = (ImageBlock, CategoryBlock),
-                 get_items=get_image_files, 
-                 splitter=RandomSplitter(seed=42),
-                 get_y=using_attr(RegexLabeller(r'(.+)_\d+.jpg$'), 'name'),
-                 item_tfms=Resize(460),
-                 batch_tfms=aug_transforms(size=224, min_scale=0.75))
+get_items(bl::TransformBlock{ImgMatrix}) = get_image_files(img_path)
 
-dls = pets.dataloaders(path/"images")
+splitter(bl::DataBlock) = randmSplitter(bl, 42)
+
+get_y(bl::DataBlock) = breedLabeller
+
+## run on CPU and then move to GPU
+item_tfms(bl::DataBlock) = Resize(460)
+
+## run on GPU
+batch_tfms(bl::DataBlock) = aug_transforms(size=224, min_scale=0.75)
+
+## create a DataLoader using DataBlock as input, return ???
+## to do
+DataLoader = function(bl::DataBlock, batchsize=256, shuffle=true)
+end
+
+## dls = Dataloaders(path / "images")
+
+train_x, train_y, val_x, val_y = splitter(pets)
+
+dset = [(train_x[i, :], train_y[i]) for i in range(1, size(train_x)[1])]
+dl = DataLoader(dset, batchsize=256, shuffle=true)
 
 ```
+
+Try Metalhead Guitar example
+
+```{julia}
+
+using Metalhead
+using DataAugmentation
+
+X = []
+Y = []
+
+img = Images.load(Downloads.download("https://cdn.pixabay.com/photo/2015/05/07/11/02/guitar-756326_960_720.jpg"));
+
+img = images[10]
+
+DATA_MEAN = (0.485, 0.456, 0.406)
+DATA_STD = (0.229, 0.224, 0.225)
+
+augmentations = CenterCrop((224, 224)) |>  ImageToTensor() |>  Normalize(DATA_MEAN, DATA_STD)
+
+data = apply(augmentations, Image(img)) |> itemdata
+
+# ImageNet labels
+labels = readlines(Downloads.download("https://raw.githubusercontent.com/pytorch/hub/master/imagenet_classes.txt"))
+
+labels = image_names
+
+model = ResNet(18; pretrain = true);
+
+data2 = stack([data, data], dims=4)
+
+size(data2)
+
+model(data2)
+
+## output imagenet classes, need to change to pets...
+model(Flux.unsqueeze(data, 4))
+size(Flux.unsqueeze(data, 4))
+println(onecold(model(Flux.unsqueeze(data, 4)), labels[1:1000]))
+
+model = Chain(
+    Metalhead.ResNet(18).layers,  # Use all layers of ResNet except the 
+)
+
+model(data2)
+
+```
+
+Adapt the above to use the pets data
+
+```{julia}
+
+n_breeds = length(unique(image_names))
+
+model = Chain(
+    Metalhead.ResNet(18).layers[1],  # Use all layers of ResNet except the last dense layer
+    Chain(
+      AdaptiveMeanPool((1, 1)),
+        MLUtils.flatten,
+        Dense(512 => 37),                   # 513_000 parameters
+    ),
+    # Dense(512, 37),  # Dense layer for number of breeds
+    softmax
+)
+
+loss(x, y) = Flux.crossentropy(model(x), y)
+opt = ADAM(0.001)
+
+X = [channelview(augment(img, pl)) for img in images]
+
+Y = onehotbatch(image_names, unique(image_names))
+
+X = stack(X[1:100])
+X = permutedims(X, (2, 3, 1, 4))
+Y = Y[:, 1:100]
+
+size(X)
+
+dataset = [(X, Y)]
+evalcb = () -> @show(loss(X, Y))
+epochs = 10
+
+# Assuming model structure like the one in the previous answer
+trainable_params = Flux.params(model[2])  # Only parameters of the last Dense layer
+
+for epoch = 1:epochs
+    println("Epoch: $epoch")
+##     Flux.train!(loss, Flux.params(model), dataset, opt, cb = throttle(evalcb, 10))
+    Flux.train!(loss, trainable_params, dataset, opt)
+end
+
+```
+
+
+```{julia}
+
+accuracy(x, y) = mean(onecold(model(x)) .== onecold(y))
+println("Accuracy: ", accuracy(X, Y))
+
+```
+
+
