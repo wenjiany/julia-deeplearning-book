@@ -19,6 +19,7 @@ using Plots
 using Statistics
 using CodecZlib
 using Downloads
+using Random
 
 import UnicodePlots
 import Tar
@@ -65,7 +66,7 @@ end
 
 img_path = joinpath(output_folder, "oxford-iiit-pet", "images")
 
-files = readdir(img_path)
+files = isdir(img_path) ? readdir(img_path) : []
 
 if length(files) == 0
     extract_tar(tar_filename, output_folder)
@@ -188,8 +189,6 @@ Define DataBlock type
 
 ```{julia}
 
-## not working yet...
-
 ### python
 ## pets = DataBlock(blocks = (ImageBlock, CategoryBlock),
 ##                  get_items=get_image_files, 
@@ -265,9 +264,6 @@ train_db, valid_db = randmSplitter(pets, 42)()
 
 get_items(bl::TransformBlock{ImgMatrix}) = bl.item
 
-
-bl::TransformBlock{ImgMatrix}
-
 get_y(bl::TransformBlock{String}) = bl.item
 get_y(pets.outputBlocks[1])
 
@@ -303,7 +299,7 @@ function onehot(bl::TransformBlock{String}, labels::Vector{String}=String[])
     return onehotbatch([bl.item], labels)
 end
 
-function DataLoader(bl::DataBlock; batchsize=256, shuffle=true, tfms::Augmentor.ImageOperation=Resize(224))
+function DataBlockLoader(bl::DataBlock; batchsize=256, shuffle=true, tfms::Augmentor.ImageOperation=Resize(224))
 
     distinct_labels = unique(get_y.(bl.outputBlocks))
 
@@ -321,7 +317,7 @@ end
 dset = [(train_db.inputBlocks[i], train_db.outputBlocks[i]) for i in range(1, length(train_db))]
 dl = DataLoader(dset, batchsize=256, shuffle=true)
 
-train_set = DataLoader(train_db; batchsize=256, shuffle=true, tfms=Resize(224, 224))
+train_set = DataBlockLoader(train_db; batchsize=256, shuffle=true, tfms=Resize(224, 224))
 
 ```
 Try Metalhead Guitar example
@@ -336,38 +332,46 @@ Y = []
 
 img = Images.load(Downloads.download("https://cdn.pixabay.com/photo/2015/05/07/11/02/guitar-756326_960_720.jpg"));
 
-img = images[10]
-
 DATA_MEAN = (0.485, 0.456, 0.406)
 DATA_STD = (0.229, 0.224, 0.225)
 
 augmentations = CenterCrop((224, 224)) |>  ImageToTensor() |>  Normalize(DATA_MEAN, DATA_STD)
 
 data = apply(augmentations, Image(img)) |> itemdata
+size(data)
 
 # ImageNet labels
 labels = readlines(Downloads.download("https://raw.githubusercontent.com/pytorch/hub/master/imagenet_classes.txt"))
 
-labels = image_names
-
 model = ResNet(18; pretrain = true);
 
-data2 = stack([data, data], dims=4)
-
-size(data2)
-
-model(data2)
-
 ## output imagenet classes, need to change to pets...
-model(Flux.unsqueeze(data, 4))
 size(Flux.unsqueeze(data, 4))
-println(onecold(model(Flux.unsqueeze(data, 4)), labels[1:1000]))
+model(Flux.unsqueeze(data, 4))
+
+println(onecold(model(Flux.unsqueeze(data, 4)), labels))
+
+data2 = stack([data, data], dims=4);
+size(data2)
+model(data2)
+println(onecold(model(data2), labels))
+
 
 model = Chain(
-    Metalhead.ResNet(18).layers,  # Use all layers of ResNet except the 
+    Metalhead.ResNet(18; pretrain=true).layers,  # Use all layers of ResNet and use pretrained weights
 )
 
-model(data2)
+println(onecold(model(data2), labels))
+
+model = Chain(
+    Metalhead.ResNet(18).layers,  # Use all layers of ResNet and use pretrained weights
+)
+
+println(onecold(model(data2), labels))
+
+img = images[10]
+
+labels = image_names
 
 ```
 
@@ -378,7 +382,7 @@ Adapt the above to use the pets data
 n_breeds = length(unique(image_names))
 
 model = Chain(
-    Metalhead.ResNet(18).layers[1],  # Use all layers of ResNet except the last dense layer
+    Metalhead.ResNet(18; pretrain=true).layers[1],  # Use all layers of ResNet except the last dense layer
     Chain(
       AdaptiveMeanPool((1, 1)),
         MLUtils.flatten,
@@ -391,6 +395,10 @@ model = Chain(
 loss(x, y) = Flux.crossentropy(model(x), y)
 opt = ADAM(0.001)
 
+accuracy(x, y) = mean(onecold(model(x)) .== onecold(y))
+println("Accuracy: ", accuracy(X, Y))
+
+## try a minibatch
 X = [channelview(augment(img, pl)) for img in images]
 
 Y = onehotbatch(image_names, unique(image_names))
@@ -400,13 +408,25 @@ X = permutedims(X, (2, 3, 1, 4))
 Y = Y[:, 1:100]
 
 size(X)
+size(Y)
 
 dataset = [(X, Y)]
-evalcb = () -> @show(loss(X, Y))
+## evalcb = () -> @show(loss(X, Y))
+
 epochs = 10
 
 # Assuming model structure like the one in the previous answer
 trainable_params = Flux.params(model[2])  # Only parameters of the last Dense layer
+
+onecold(model(X[:, :, :, 10:11]), unique(image_names))
+image_names[10:11]
+
+accuracy(X[:, :, :, 10:11], Y[:, 10:11])
+
+Flux.train!(loss, trainable_params, dataset, opt)
+
+onecold(model(X[:, :, :, 10:11]), unique(image_names))
+image_names[10:11]
 
 for epoch = 1:epochs
     println("Epoch: $epoch")
@@ -422,8 +442,6 @@ end
 
 ```{julia}
 
-accuracy(x, y) = mean(onecold(model(x)) .== onecold(y))
-println("Accuracy: ", accuracy(X, Y))
 
 ```
 
