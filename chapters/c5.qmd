@@ -101,7 +101,6 @@ filter(str -> occursin(r"(.+)_\d+.jpg$", str), files) ## will return the matchin
 ```
 
 ```{julia}
-#| eval: false
 
 # Load all images
 function load_images(folder::String)
@@ -224,7 +223,7 @@ image_files = get_image_files(img_path)
 
 function regexLabeller(r::Regex)
     function _inner(o::String)
-        return match(r, o)[1]
+        return String(match(r, o)[1])
     end
     return _inner
 end
@@ -234,64 +233,97 @@ breedLabeller = regexLabeller(r"(.+)_\d+.jpg$")
 image_names  = breedLabeller.(image_files)
 ## image_names = [match(r"^(.+)_\d+.jpg$", x)[1] for x in image_files]
 
-data = DataBlock{ImgMatrix, String}(imgBlock, TransformBlock{String}(image_names))
+pets = DataBlock{ImgMatrix, String}(
+    TransformBlock{ImgMatrix}.(images), 
+    TransformBlock{String}.(image_names)
+)
 
 ## return two DataBlocks, training and validation
 ## todo
-function randmSplitter(db::DataBlock, seed)
+function randmSplitter(db::DataBlock{T, U}, seed::Int64=42) where {T, U}
 
     x = db.inputBlocks
     y = db.outputBlocks
+
+    Random.seed!(seed)
     
     function _split()
-        i_train, i_val = [], []
-        for (k, v) in group_indices(y)
-            _i_train, _i_val = splitobs(v, at=0.7)
-            push!(i_train, _i_train...)
-            push!(i_val, _i_val...)
-        end
-        Xtrain, ytrain = X[:, :, i_train], y_enc[:, i_train]
-        Xval, yval = X[:, :, i_val], y_enc[:, i_val]
+        idxs = shuffle(1:length(y))
+        cut = round(Int, 0.8 * length(idxs))
 
-        return Xtrain, ytrain, Xval, yval
+        trainidxs, valididxs = idxs[1:cut], idxs[cut+1:end]
+        
+        train_x, valid_x = x[trainidxs], x[valididxs]
+        train_y, valid_y = y[trainidxs], y[valididxs]
+        
+        return DataBlock(train_x, train_y), DataBlock(valid_x, valid_y)
     end
     return _split
 end
 
+train_db, valid_db = randmSplitter(pets, 42)()
+
+get_items(bl::TransformBlock{ImgMatrix}) = bl.item
+
+
+bl::TransformBlock{ImgMatrix}
+
+get_y(bl::TransformBlock{String}) = bl.item
+get_y(pets.outputBlocks[1])
+
+## run on CPU and then move to GPU
+item_tfms(bl::TransformBlock{ImgMatrix}) = TransformBlock{ImgMatrix}(augment(bl.item, Resize(460)))
+item_tfms(pets.inputBlocks[1])
+
+## run on GPU
+batch_tfms = function(bls::Vector{TransformBlock{ImgMatrix}}, tfms::Augmentor.ImageOperation)
+    [TransformBlock(augment(bl.item, tfms)) for bl in bls]
+end
+
+batch_tfms(pets.inputBlocks[1:3], Resize(224, 224))
+
+
+Base.length(db::DataBlock) = length(db.inputBlocks)
+
+length(train_db)
+
 
 ```
 
+create a DataLoader using DataBlock as input, 
+and return a DataLoader of data in the format that can be fed into Metalhead models
 
 ```{julia}
 
-pets = DataBlock(imgBlock, catBlock)
-
-get_items(bl::TransformBlock{ImgMatrix}) = get_image_files(img_path)
-
-splitter(bl::DataBlock) = randmSplitter(bl, 42)
-
-get_y(bl::DataBlock) = breedLabeller
-
-## run on CPU and then move to GPU
-item_tfms(bl::DataBlock) = Resize(460)
-
-## run on GPU
-batch_tfms(bl::DataBlock) = aug_transforms(size=224, min_scale=0.75)
-
-## create a DataLoader using DataBlock as input, return ???
-## to do
-DataLoader = function(bl::DataBlock, batchsize=256, shuffle=true)
+function image2array(bl::TransformBlock{ImgMatrix})
+    return permutedims(channelview(bl.item), [2, 3, 1])
 end
 
-## dls = Dataloaders(path / "images")
+function onehot(bl::TransformBlock{String}, labels::Vector{String}=String[])
+    return onehotbatch([bl.item], labels)
+end
 
-train_x, train_y, val_x, val_y = splitter(pets)
+function DataLoader(bl::DataBlock; batchsize=256, shuffle=true, tfms::Augmentor.ImageOperation=Resize(224))
 
-dset = [(train_x[i, :], train_y[i]) for i in range(1, size(train_x)[1])]
+    distinct_labels = unique(get_y.(bl.outputBlocks))
+
+    ## do a batch transform on the inputBlocks
+    ## convert inputBlocks to a vector of images of size (224, 224, 3, blocksize)
+    input = image2array.(batch_tfms(bl.inputBlocks, tfms))
+    ## convert outputBlocks to a vector of labels of size (blocksize,)
+    output = [onehot(x, distinct_labels) for x in pets.outputBlocks]
+
+    return DataLoader(collect(zip(input, output)), batchsize=batchsize, shuffle=shuffle)
+end
+
+## dset = [(train_x[i, :], train_y[i]) for i in range(1, size(train_x)[1])]
+
+dset = [(train_db.inputBlocks[i], train_db.outputBlocks[i]) for i in range(1, length(train_db))]
 dl = DataLoader(dset, batchsize=256, shuffle=true)
 
-```
+train_set = DataLoader(train_db; batchsize=256, shuffle=true, tfms=Resize(224, 224))
 
+```
 Try Metalhead Guitar example
 
 ```{julia}
@@ -379,7 +411,10 @@ trainable_params = Flux.params(model[2])  # Only parameters of the last Dense la
 for epoch = 1:epochs
     println("Epoch: $epoch")
 ##     Flux.train!(loss, Flux.params(model), dataset, opt, cb = throttle(evalcb, 10))
-    Flux.train!(loss, trainable_params, dataset, opt)
+
+    for (i, data) in enumerate(train_set)
+        Flux.train!(loss, trainable_params, dataset, opt)
+    end
 end
 
 ```
