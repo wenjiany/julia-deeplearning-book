@@ -154,13 +154,13 @@ Image augmentation
 
 using Augmentor
 
-pl = Resize(460, 460) |>
-     Rotate(-30)  |>
+p1 = Resize(460, 460)
+
+p2 = Rotate(-30)  |>
      Zoom(1.8) |>
      Resize(224, 224)
 
-img_new = augment(image, pl)
-
+img_new = augment(image, p1 |> p2)
 
 ```
 
@@ -237,6 +237,17 @@ pets = DataBlock{ImgMatrix, String}(
     TransformBlock{String}.(image_names)
 )
 
+#findall(pets.inputBlocks)
+findall(img -> size(channelview(img.item))[1] == 4, pets.inputBlocks)  ## will find the location indices
+
+xx = map(img -> size(channelview(img.item))[1], pets.inputBlocks)  ## will find the location indices
+
+StatsBase.countmap(xx)
+
+```
+
+```{julia}
+
 ## return two DataBlocks, training and validation
 ## todo
 function randmSplitter(db::DataBlock{T, U}, seed::Int64=42) where {T, U}
@@ -306,6 +317,7 @@ function DataBlockLoader(bl::DataBlock; batchsize=256, shuffle=true, tfms::Augme
     ## do a batch transform on the inputBlocks
     ## convert inputBlocks to a vector of images of size (224, 224, 3, blocksize)
     input = image2array.(batch_tfms(bl.inputBlocks, tfms))
+
     ## convert outputBlocks to a vector of labels of size (blocksize,)
     output = [onehot(x, distinct_labels) for x in pets.outputBlocks]
 
@@ -371,78 +383,80 @@ println(onecold(model(data2), labels))
 
 img = images[10]
 
-labels = image_names
+println(onecold(model(data2), labels))
 
 ```
 
 Adapt the above to use the pets data
+Simplify the above code in order to use GPU, and not use custom types
+
 
 ```{julia}
 
-n_breeds = length(unique(image_names))
+pet_labels = sort(unique(image_names))
+n_breeds = length(pet_labels)
+
+## how to move augmentation to GPU?
+## X = [channelview(augment(img, p1)) for img in images] |> gpu
+X = [channelview(augment(dl.item, p1 |> p2)) for dl in train_db.inputBlocks] |> gpu
+
+## Y = onehotbatch(get_y.(train_db.outputBlocks), pet_labels) |> gpu
+
+## Y = [onehotbatch([yb.item], pet_labels) for yb in train_db.outputBlocks] |> gpu
 
 model = Chain(
     Metalhead.ResNet(18; pretrain=true).layers[1],  # Use all layers of ResNet except the last dense layer
     Chain(
       AdaptiveMeanPool((1, 1)),
         MLUtils.flatten,
-        Dense(512 => 37),                   # 513_000 parameters
+        Dense(512 => n_breeds),
     ),
     # Dense(512, 37),  # Dense layer for number of breeds
     softmax
-)
+) |> gpu
 
-loss(x, y) = Flux.crossentropy(model(x), y)
+loss(x, y) = Flux.crossentropy(model(x), y) |> gpu
 opt = ADAM(0.001)
 
 accuracy(x, y) = mean(onecold(model(x)) .== onecold(y))
 println("Accuracy: ", accuracy(X, Y))
 
 ## try a minibatch
-X = [channelview(augment(img, pl)) for img in images]
 
-Y = onehotbatch(image_names, unique(image_names))
+X = [permutedims(img, (2, 3, 1)) for img in X]
 
-X = stack(X[1:100])
-X = permutedims(X, (2, 3, 1, 4))
-Y = Y[:, 1:100]
+pets_dl = DataLoader(collect(zip(X, Y)), batchsize=10, shuffle=true)
+dataset = first(pets_dl)
 
-size(X)
-size(Y)
-
-dataset = [(X, Y)]
 ## evalcb = () -> @show(loss(X, Y))
-
-epochs = 10
 
 # Assuming model structure like the one in the previous answer
 trainable_params = Flux.params(model[2])  # Only parameters of the last Dense layer
 
-onecold(model(X[:, :, :, 10:11]), unique(image_names))
+onecold(model(X[:, :, :, 10:11]), pet_labels)
 image_names[10:11]
 
 accuracy(X[:, :, :, 10:11], Y[:, 10:11])
 
 Flux.train!(loss, trainable_params, dataset, opt)
 
-onecold(model(X[:, :, :, 10:11]), unique(image_names))
+onecold(model(X[:, :, :, 10:11]), pet_labels)
 image_names[10:11]
+
+epochs = 10
 
 for epoch = 1:epochs
     println("Epoch: $epoch")
 ##     Flux.train!(loss, Flux.params(model), dataset, opt, cb = throttle(evalcb, 10))
 
-    for (i, data) in enumerate(train_set)
-        Flux.train!(loss, trainable_params, dataset, opt)
+    for (i, dataset) in enumerate(pets_dl)
+        data = stack([d[1] for d in dataset], dims=4)
+        y = dropdims(stack([d[2] for d in dataset], dims=2), dims=3)
+        Flux.train!(loss, trainable_params, data, opt)
     end
 end
 
 ```
 
-
-```{julia}
-
-
-```
 
 
