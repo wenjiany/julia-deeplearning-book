@@ -242,6 +242,7 @@ findall(img -> size(channelview(img.item))[1] == 4, pets.inputBlocks)  ## will f
 
 xx = map(img -> size(channelview(img.item))[1], pets.inputBlocks)  ## will find the location indices
 
+using StatsBase
 StatsBase.countmap(xx)
 
 ```
@@ -399,8 +400,10 @@ n_breeds = length(pet_labels)
 ## how to move augmentation to GPU?
 ## X = [channelview(augment(img, p1)) for img in images] |> gpu
 X = [channelview(augment(dl.item, p1 |> p2)) for dl in train_db.inputBlocks] |> gpu
+X = [permutedims(img, (2, 3, 1)) for img in X]
 
-## Y = onehotbatch(get_y.(train_db.outputBlocks), pet_labels) |> gpu
+
+Y = onehotbatch(get_y.(train_db.outputBlocks), pet_labels) |> gpu
 
 ## Y = [onehotbatch([yb.item], pet_labels) for yb in train_db.outputBlocks] |> gpu
 
@@ -418,15 +421,18 @@ model = Chain(
 loss(x, y) = Flux.crossentropy(model(x), y) |> gpu
 opt = ADAM(0.001)
 
+model(Flux.unsqueeze(X[10], dims=4))
+
+X = stack(X);
+
+model(X[:, :, :, 1:10])
+loss(X[:,:,:,1:10], Y[:, 1:10])
+
 accuracy(x, y) = mean(onecold(model(x)) .== onecold(y))
-println("Accuracy: ", accuracy(X, Y))
+println("Accuracy: ", accuracy(X[:,:,:,1:20], Y[:, 1:20]))
 
 ## try a minibatch
 
-X = [permutedims(img, (2, 3, 1)) for img in X]
-
-pets_dl = DataLoader(collect(zip(X, Y)), batchsize=10, shuffle=true)
-dataset = first(pets_dl)
 
 ## evalcb = () -> @show(loss(X, Y))
 
@@ -438,10 +444,19 @@ image_names[10:11]
 
 accuracy(X[:, :, :, 10:11], Y[:, 10:11])
 
-Flux.train!(loss, trainable_params, dataset, opt)
+accuracy(X[:, :, :, 1:100], Y[:, 1:100])
+
+data =[(X[:, :, :, 1:11], Y[:, 1:11])]
+Flux.train!(loss, trainable_params, data, opt)
 
 onecold(model(X[:, :, :, 10:11]), pet_labels)
 image_names[10:11]
+
+pets_dl = DataLoader(1:size(Y)[2], batchsize=10, shuffle=true)
+data_idx = first(pets_dl)
+
+data =[(X[:, :, :, data_idx], Y[:, data_idx])];
+Flux.train!(loss, trainable_params, data, opt)
 
 epochs = 10
 
@@ -449,9 +464,9 @@ for epoch = 1:epochs
     println("Epoch: $epoch")
 ##     Flux.train!(loss, Flux.params(model), dataset, opt, cb = throttle(evalcb, 10))
 
-    for (i, dataset) in enumerate(pets_dl)
-        data = stack([d[1] for d in dataset], dims=4)
-        y = dropdims(stack([d[2] for d in dataset], dims=2), dims=3)
+    for (i, data_idx) in enumerate(pets_dl)
+        println(i)
+        data =[(X[:, :, :, data_idx], Y[:, data_idx])];
         Flux.train!(loss, trainable_params, data, opt)
     end
 end
