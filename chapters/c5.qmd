@@ -394,18 +394,20 @@ Simplify the above code in order to use GPU, and not use custom types
 
 ```{julia}
 
+
 pet_labels = sort(unique(image_names))
 n_breeds = length(pet_labels)
 
-## how to move augmentation to GPU?
-## X = [channelview(augment(img, p1)) for img in images] |> gpu
-X = [channelview(augment(dl.item, p1 |> p2)) for dl in train_db.inputBlocks] |> gpu
-X = [permutedims(img, (2, 3, 1)) for img in X]
 
+## augment images
 
-Y = onehotbatch(get_y.(train_db.outputBlocks), pet_labels) |> gpu
+X = [channelview(augment(dl.item, p1 |> p2)) for dl in train_db.inputBlocks] # |> gpu
+X = stack([permutedims(img, (2, 3, 1)) for img in X]) # |> gpu
+X = Array{Float32}(X) |> gpu
+size(X)
 
-## Y = [onehotbatch([yb.item], pet_labels) for yb in train_db.outputBlocks] |> gpu
+Y = onehotbatch(get_y.(train_db.outputBlocks), pet_labels) # |> gpu
+Y = Matrix{Int8}(Y) |> gpu
 
 model = Chain(
     Metalhead.ResNet(18; pretrain=true).layers[1],  # Use all layers of ResNet except the last dense layer
@@ -419,44 +421,26 @@ model = Chain(
 ) |> gpu
 
 loss(x, y) = Flux.crossentropy(model(x), y) |> gpu
-opt = ADAM(0.001)
 
-model(Flux.unsqueeze(X[10], dims=4))
+onecold(model(X[:, :, :, 10:11]), pet_labels)
+image_names[10:11]
 
-X = stack(X);
+accuracy(x, y) = mean(onecold(model(x)) .== onecold(y)) |> gpu
 
-model(X[:, :, :, 1:10])
-loss(X[:,:,:,1:10], Y[:, 1:10])
-
-accuracy(x, y) = mean(onecold(model(x)) .== onecold(y))
 println("Accuracy: ", accuracy(X[:,:,:,1:20], Y[:, 1:20]))
 
-## try a minibatch
+evalcb = () -> @show(loss(X[:,:,:,1:100], Y[:, 1:100])) |> gpu
 
-
-## evalcb = () -> @show(loss(X, Y))
-
-# Assuming model structure like the one in the previous answer
 trainable_params = Flux.params(model[2])  # Only parameters of the last Dense layer
 
-onecold(model(X[:, :, :, 10:11]), pet_labels)
-image_names[10:11]
+opt = ADAM(0.001) |> gpu
 
-accuracy(X[:, :, :, 10:11], Y[:, 10:11])
+### move data to GPU
 
-accuracy(X[:, :, :, 1:100], Y[:, 1:100])
+X = Array{Float32}(X) |> gpu
+Y = Y |> gpu
 
-data =[(X[:, :, :, 1:11], Y[:, 1:11])]
-Flux.train!(loss, trainable_params, data, opt)
-
-onecold(model(X[:, :, :, 10:11]), pet_labels)
-image_names[10:11]
-
-pets_dl = DataLoader(1:size(Y)[2], batchsize=10, shuffle=true)
-data_idx = first(pets_dl)
-
-data =[(X[:, :, :, data_idx], Y[:, data_idx])];
-Flux.train!(loss, trainable_params, data, opt)
+pets_dl = DataLoader((X, Y), batchsize=10, shuffle=true) |> gpu
 
 epochs = 10
 
@@ -464,12 +448,31 @@ for epoch = 1:epochs
     println("Epoch: $epoch")
 ##     Flux.train!(loss, Flux.params(model), dataset, opt, cb = throttle(evalcb, 10))
 
+    Flux.train!(loss, trainable_params, pets_dl, opt, cb = evalcb)
+end
+
+### alternatively to use update
+
+pets_dl = DataLoader(1:size(Y)[2], batchsize=10, shuffle=true) |> gpu
+data_idx = first(pets_dl)
+
+for epoch = 1:epochs
     for (i, data_idx) in enumerate(pets_dl)
-        println(i)
+
         data =[(X[:, :, :, data_idx], Y[:, data_idx])];
-        Flux.train!(loss, trainable_params, data, opt)
+
+       ##  Flux.train!(loss, trainable_params, data, opt)
+
+        x = data[1][1]
+        ### batch transform on x here on gpu
+        
+        y = data[1][2]
+        grads = gradient(()->loss(x, y), trainable_params)
+        Flux.update!(opt, trainable_params, grads.grads)
     end
 end
+
+accuracy(X[:,:,:, 101:200], Y[:, 101:200])
 
 ```
 
