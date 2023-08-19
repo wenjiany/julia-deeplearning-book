@@ -398,16 +398,27 @@ Simplify the above code in order to use GPU, and not use custom types
 pet_labels = sort(unique(image_names))
 n_breeds = length(pet_labels)
 
+## prepare data for Flux
 
-## augment images
+function prepare_flux_data(db::DataBlock, tfms::Augmentor.ImageOperation=nothing)
 
-X = [channelview(augment(dl.item, p1 |> p2)) for dl in train_db.inputBlocks] # |> gpu
-X = stack([permutedims(img, (2, 3, 1)) for img in X]) # |> gpu
-X = Array{Float32}(X) |> gpu
-size(X)
+    if tfms != nothing
+        X = batch_tfm.(db.inputBlocks, tfms)
+    end
+    X = [channelview(dl) for dl in db.inputBlocks] 
+    X = stack([permutedims(img, (2, 3, 1)) for img in X]) 
+    X = Array{Float32}(X)
 
-Y = onehotbatch(get_y.(train_db.outputBlocks), pet_labels) # |> gpu
-Y = Matrix{Int8}(Y) |> gpu
+    Y = onehotbatch(get_y.(train_db.outputBlocks), pet_labels) # |> gpu
+    Y = Matrix{Int8}(Y)
+
+    return X, Y
+end
+
+train_X, train_Y = prepare_flux_data(train_db, p1 |> p2)
+
+valid_X, valid_Y = prepare_flux_data(train_db, p1 |> p2)
+
 
 model = Chain(
     Metalhead.ResNet(18; pretrain=true).layers[1],  # Use all layers of ResNet except the last dense layer
@@ -436,9 +447,18 @@ trainable_params = Flux.params(model[2])  # Only parameters of the last Dense la
 opt = ADAM(0.001) |> gpu
 
 ### move data to GPU
+## make sure the type of the data is Float32
 
-X = Array{Float32}(X) |> gpu
-Y = Y |> gpu
+X = Array{Float32}(train_X) |> gpu
+Y = train_Y |> gpu
+
+## X = [channelview(augment(dl.item, p1 |> p2)) for dl in train_db.inputBlocks] # |> gpu
+## X = stack([permutedims(img, (2, 3, 1)) for img in X]) # |> gpu
+## X = Array{Float32}(X) |> gpu
+## size(X)
+## 
+## Y = onehotbatch(get_y.(train_db.outputBlocks), pet_labels) # |> gpu
+## Y = Matrix{Int8}(Y) |> gpu
 
 pets_dl = DataLoader((X, Y), batchsize=10, shuffle=true) |> gpu
 
