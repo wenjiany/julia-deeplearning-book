@@ -105,17 +105,22 @@ filter(str -> occursin(r"(.+)_\d+.jpg$", str), files) ## will return the matchin
 
 # Load all images
 function load_images(folder::String)
+    ## images = Vector{Array{RGB{N0f8}, 2}}()  # actually use more memory?
     images = []
     for file in readdir(folder)
         if occursin(".jpg", file)
-            path = joinpath(folder, file)
-            push!(images, load(path))
+            try
+                path = joinpath(folder, file)
+                push!(images, load(path))
+            catch
+                println("$file failed to load")
+            end
         end
     end
     return images
 end
 
-images = load_images(img_path)
+images = load_images(img_path);
 
 println("Loaded $(length(images)) images.")
 
@@ -169,22 +174,23 @@ img_new = augment(image, p1 |> p2)
 
 ## implimnetation of prospective warp
 ## not working yet...
-using StaticArrays, CoordinateTransformations
-
-M = @SMatrix [1 0 0; 0 1 0; -1/1000 0 1] 
-
-tform = PerspectiveMap() ∘ inv(LinearMap(M))
-
-push1(x) = push(x, 1)
-
-tform2 = PerspectiveMap() ∘ inv(LinearMap(M)) ∘ push1
-
-tform2(@SVector([1,1]))
-
-imgw = warp(image, tform2, Images.indices_spatial(image)); 
-hcat(image, imgw)
-
+### using StaticArrays, CoordinateTransformations
+### 
+### M = @SMatrix [1 0 0; 0 1 0; -1/1000 0 1] 
+### 
+### tform = PerspectiveMap() ∘ inv(LinearMap(M))
+### 
+### push1(x) = push(x, 1)
+### 
+### tform2 = PerspectiveMap() ∘ inv(LinearMap(M)) ∘ push1
+### 
+### tform2(@SVector([1,1]))
+### 
+### imgw = warp(image, tform2, Images.indices_spatial(image)); 
+### hcat(image, imgw)
+### 
 ```
+
 Define DataBlock type
 
 ```{julia}
@@ -231,6 +237,11 @@ breedLabeller = regexLabeller(r"(.+)_\d+.jpg$")
 
 image_names  = breedLabeller.(image_files)
 ## image_names = [match(r"^(.+)_\d+.jpg$", x)[1] for x in image_files]
+
+for name in names(Main)
+    obj = getfield(Main, name)    
+    println("$name: ", Base.summarysize(obj), " bytes")
+end
 
 pets = DataBlock{ImgMatrix, String}(
     TransformBlock{ImgMatrix}.(images), 
@@ -316,7 +327,7 @@ function onehot(bl::TransformBlock{String}, labels::Vector{String}=String[])
     return onehotbatch([bl.item], labels)
 end
 
-function DataBlockLoader(bl::DataBlock; batchsize=10, shuffle=true, tfms::Augmentor.ImageOperation=Resize(224))
+function DataLoader(bl::DataBlock; batchsize=10, shuffle=true, tfms::Augmentor.Pipeline=Augmentor.Pipeline(Resize(224, 224)))
 
     distinct_labels = unique(get_y.(bl.outputBlocks))
 
@@ -327,21 +338,7 @@ function DataBlockLoader(bl::DataBlock; batchsize=10, shuffle=true, tfms::Augmen
     ## convert outputBlocks to a vector of labels of size (blocksize,)
     output = [onehot(x, distinct_labels) for x in pets.outputBlocks]
 
-    return DataLoader(collect(zip(input, output)), batchsize=batchsize, shuffle=shuffle)
-end
-
-function DataLoader(bl::DataBlock; batchsize=10, shuffle=true, tfms::Augmentor.ImageOperation=Resize(224))
-
-    distinct_labels = unique(get_y.(bl.outputBlocks))
-
-    ## do a batch transform on the inputBlocks
-    ## convert inputBlocks to a vector of images of size (224, 224, 3, blocksize)
-    input = image2array.(batch_tfms(bl.inputBlocks, tfms))
-
-    ## convert outputBlocks to a vector of labels of size (blocksize,)
-    output = [onehot(x, distinct_labels) for x in pets.outputBlocks]
-
-    return DataLoader(collect(zip(input, output)), batchsize=batchsize, shuffle=shuffle)
+    return Flux.DataLoader(collect(zip(input, output)), batchsize=batchsize, shuffle=shuffle)
 end
 
 ## dset = [(train_x[i, :], train_y[i]) for i in range(1, size(train_x)[1])]
@@ -349,7 +346,7 @@ end
 dset = [(train_db.inputBlocks[i], train_db.outputBlocks[i]) for i in range(1, length(train_db))]
 dl = DataLoader(dset, batchsize=10, shuffle=true)
 
-train_set = DataLoader(train_db; batchsize=10, shuffle=true, tfms=Resize(224, 224))
+train_set = DataLoader(train_db; batchsize=10, shuffle=true, tfms=Augmentor.Pipeline(Resize(224, 224)))
 
 ```
 Try Metalhead Guitar example
@@ -432,15 +429,16 @@ function prepare_flux_data(db::DataBlock, labels, tfms::Augmentor.ImmutablePipel
     return X, Y
 end
 
-train_X, train_Y = prepare_flux_data(train_db, pet_labels, p1 |> p2)
-valid_X, valid_Y = prepare_flux_data(valid_db, pet_labels)
+train_X, train_Y = prepare_flux_data(train_db, pet_labels, p1 |> p2) |> gpu
+valid_X, valid_Y = prepare_flux_data(valid_db, pet_labels) |> gpu
 
 function DataLoader(bl::DataBlock, labels; batchsize=10, shuffle=true, tfms::Augmentor.ImmutablePipeline=Augmentor.Pipeline(Resize(224, 224)))
     X, Y = prepare_flux_data(bl, labels, tfms)
-    return DataLoader((X, Y), batchsize=batchsize, shuffle=shuffle)
+    return Flux.DataLoader((X, Y), batchsize=batchsize, shuffle=shuffle)
 end
 
-train_dl = DataLoader(train_db, pet_labels; batchsize=10 shuffle=true, tfms=p1 |> p2)
+### too many copies of the data, out-of-memory
+## train_dl = DataLoader(train_db, pet_labels; batchsize=10, shuffle=true, tfms=p1 |> p2)
 
 model = Chain(
     Metalhead.ResNet(18; pretrain=true).layers[1],  # Use all layers of ResNet except the last dense layer
@@ -455,14 +453,14 @@ model = Chain(
 
 loss(x, y) = Flux.crossentropy(model(x), y) |> gpu
 
-onecold(model(X[:, :, :, 10:11]), pet_labels)
+onecold(model(train_X[:, :, :, 10:11]), pet_labels)
 image_names[10:11]
 
 accuracy(x, y) = mean(onecold(model(x)) .== onecold(y)) |> gpu
 
-println("Accuracy: ", accuracy(X[:,:,:,1:20], Y[:, 1:20]))
+println("Accuracy: ", accuracy(train_X[:,:,:,1:20], train_Y[:, 1:20]))
 
-evalcb = () -> @show(loss(X[:,:,:,1:100], Y[:, 1:100])) |> gpu
+evalcb = () -> @show(loss(train_X[:,:,:,1:100], train_Y[:, 1:100])) |> gpu
 
 trainable_params = Flux.params(model[2])  # Only parameters of the last Dense layer
 
@@ -471,8 +469,8 @@ opt = ADAM(0.001) |> gpu
 ### move data to GPU
 ## make sure the type of the data is Float32
 
-X = Array{Float32}(train_X) |> gpu
-Y = train_Y |> gpu
+## X = Array{Float32}(train_X) |> gpu
+## Y = train_Y |> gpu
 
 ## X = [channelview(augment(dl.item, p1 |> p2)) for dl in train_db.inputBlocks] # |> gpu
 ## X = stack([permutedims(img, (2, 3, 1)) for img in X]) # |> gpu
@@ -482,7 +480,7 @@ Y = train_Y |> gpu
 ## Y = onehotbatch(get_y.(train_db.outputBlocks), pet_labels) # |> gpu
 ## Y = Matrix{Int8}(Y) |> gpu
 
-pets_dl = DataLoader((X, Y), batchsize=10, shuffle=true) |> gpu
+pets_dl = Flux.DataLoader((train_X, train_Y), batchsize=10, shuffle=true) |> gpu
 
 epochs = 10
 
@@ -493,15 +491,34 @@ for epoch = 1:epochs
     Flux.train!(loss, trainable_params, pets_dl, opt, cb = evalcb)
 end
 
+accuracy(train_X[:,:,:, 101:200], train_Y[:, 101:200])
+
+## xx = Flux.glorot_uniform(size(layer_to_reset[3].weight)...) |> gpu
+## layer_to_reset[3].weight .= xx
+
+trainable_params[1] .= (Flux.glorot_uniform(size(trainable_params[1])...) |> gpu)
+trainable_params[2] .= (Flux.glorot_uniform(size(trainable_params[2])...) |> gpu)
+
+accuracy(train_X[:,:,:, 101:200], train_Y[:, 101:200])
+
+## doesn't work
+## trainable_params[1] .= (Flux.glorot_uniform(size(trainable_params[1])...))
+
+```
+
+```{julia}
+
 ### alternatively to use update
 
-pets_dl = DataLoader(1:size(Y)[2], batchsize=10, shuffle=true) |> gpu
+pets_dl = Flux.DataLoader(1:size(train_Y)[2], batchsize=10, shuffle=true) |> gpu
 data_idx = first(pets_dl)
 
 for epoch = 1:epochs
+    println("Epoch: $epoch")
+    
     for (i, data_idx) in enumerate(pets_dl)
-
-        data =[(X[:, :, :, data_idx], Y[:, data_idx])];
+        print(i)
+        data =[(train_X[:, :, :, data_idx], train_Y[:, data_idx])];
 
        ##  Flux.train!(loss, trainable_params, data, opt)
 
@@ -514,9 +531,200 @@ for epoch = 1:epochs
     end
 end
 
-accuracy(X[:,:,:, 101:200], Y[:, 101:200])
+accuracy(train_X[:,:,:, 101:200], train_Y[:, 101:200])
+
+accuracy(train_X, train_Y)
 
 ```
 
+Learning rate finder...
 
+```{julia}
+
+lr = 10 .^ (collect(range(-6, stop=1, step=0.2) ))
+lr_losses = zeros(length(lr))
+
+### reset model parameters
+
+# layer_to_reset = model.layers[2]
+# layer_to_reset[3].weight .= ( Flux.glorot_uniform(size(layer_to_reset[3].weight)...) |> gpu)
+
+
+pets_dl = Flux.DataLoader(1:size(train_Y)[2], batchsize=10, shuffle=true) |> gpu
+
+for (i, data_idx) in enumerate(pets_dl)
+    print(i)
+    if (i > length(lr))
+        break
+    end
+
+    trainable_params[1] .= (Flux.glorot_uniform(size(trainable_params[1])...) |> gpu)
+    trainable_params[2] .= (Flux.glorot_uniform(size(trainable_params[2])...) |> gpu)
+
+    opt = ADAM(lr[i]) |> gpu
+    data =[(train_X[:, :, :, data_idx], train_Y[:, data_idx])];
+
+    ##  Flux.train!(loss, trainable_params, data, opt)
+
+    x = data[1][1]
+    y = data[1][2]
+    grads = gradient(()->loss(x, y), trainable_params)
+    Flux.update!(opt, trainable_params, grads.grads)
+
+    lr_losses[i] = loss(x, y)
+end
+
+using Loess, Plots
+
+xs = log10.(lr)
+ys = lr_losses
+
+ml = loess(xs, ys, span=0.5)
+
+us = range(extrema(xs)...; step = 0.1)
+vs = predict(ml, us)
+
+us[argmin(vs)]
+scatter(xs, ys)
+plot!(us, vs, legend=false)
+
+```
+
+Put lr_finder into a funciton
+
+```{julia}
+
+typeof(trainable_params)
+
+## to do methods to reset param
+function reset_params!(params::Flux.Zygote.Params, method::Function=Flux.glorot_uniform)
+    n_layers = length(trainable_params)
+    for i in 1:n_layers
+        params[i] .= (Flux.glorot_uniform(size(params[i])...) |> gpu)
+    end, 
+end |> gpu
+
+function reset_params!(params::Flux.Zygote.Params, func::Function=Flux.glorot_uniform)
+    n_layers = length(trainable_params)
+    for i in 1:n_layers
+        params[i] .= (func(size(params[i])...) |> gpu)
+    end
+end |> gpu
+
+function reset_params!(params::Flux.Zygote.Params, reset_to::Flux.Zygote.Params)
+    n_layers = length(trainable_params)
+    for i in 1:n_layers
+        params[i] .= reset_to[i]
+    end
+end |> gpu
+
+orig_params = deepcopy(trainable_params)
+trainable_params
+reset_params!(trainable_params)
+trainable_params
+reset_params!(trainable_params, Flux.glorot_uniform)
+trainable_params
+reset_params!(trainable_params, orig_params)
+trainable_params
+
+```
+
+```{julia}
+
+### model is a global variable
+
+lr_range = 10 .^ (collect(range(-6, stop=1, step=0.2) ))
+
+## todo: add methods for reseting parameters
+lr_finder = function(params, dl::MLUtils.DataLoader, opt, lr_range)
+
+    lr = collect(lr_range)
+    lr_losses = zeros(length(lr))
+
+    for (i, data_idx) in enumerate(dl)
+        print(i)
+        if (i > length(lr))
+            break
+        end
+
+        reset_params!(params)
+
+        opt = ADAM(lr[i]) |> gpu
+        
+        data = [first(dl)]
+
+        Flux.train!(loss, trainable_params, data, opt)
+
+        lr_losses[i] = loss(data[1][1], data[1][2])
+    end
+
+    xs = log10.(lr)
+    ys = lr_losses
+
+    ml = loess(xs, ys, span=0.5)
+
+    us = range(extrema(xs)...; step = 0.1)
+    vs = predict(ml, us)
+
+    best_lr = us[argmin(vs)]
+    
+    pp = scatter(log10.(lr), lr_losses)
+    plot!(us, vs, legend=false)
+    
+    return best_lr, (lr=lr, losses=lr_losses), pp
+end
+
+pets_dl = Flux.DataLoader((train_X, train_Y), batchsize=10, shuffle=true) |> gpu
+
+best_lr, lr_losses, lr_plot = lr_finder(trainable_params, pets_dl, Adam(0.001), lr_range)
+
+```
+	
+Fine tune...
+
+
+```{julia}
+
+pets_dl = Flux.DataLoader((train_X, train_Y), batchsize=10, shuffle=true) |> gpu
+
+### make sure to reset the params, since it's been set to values from lr finding
+trainable_params[1] .= (Flux.glorot_uniform(size(trainable_params[1])...) |> gpu)
+trainable_params[2] .= (Flux.glorot_uniform(size(trainable_params[2])...) |> gpu)
+
+opt = ADAM(0.001) |> gpu
+
+epochs=3
+for epoch = 1:epochs
+    println("Epoch: $epoch")
+    Flux.train!(loss, trainable_params, pets_dl, opt, cb = evalcb)
+end
+
+accuracy(valid_X, valid_Y)
+
+### unfreeze, train all parameters
+
+orig_params = deepcopy(Flux.params(model));
+
+lr_range = 10 .^ (collect(range(-7, stop=3, step=0.2) ))
+
+## doesn't work right, need to reset to pretrained params instead of randomly assigning all params
+
+best_lr, lr_losses, lr_plot = lr_finder(Flux.params(model), pets_dl, Adam(0.001), lr_range)
+lr_plot
+best_lr
+
+opt = ADAM(0.0001) |> gpu
+
+for epoch = 1:epochs
+    println("Epoch: $epoch")
+    Flux.train!(loss, Flux.params(model), pets_dl, opt, cb = evalcb)
+end
+
+accuracy(train_X[:,:,:, 1:2000], train_Y[:, 1:2000])
+## accuracy(valid_X[:,:,:, 1:1000], valid_Y[:, 1:1000])
+
+accuracy(valid_X, valid_Y)
+
+
+```
 
