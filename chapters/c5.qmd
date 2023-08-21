@@ -238,11 +238,6 @@ breedLabeller = regexLabeller(r"(.+)_\d+.jpg$")
 image_names  = breedLabeller.(image_files)
 ## image_names = [match(r"^(.+)_\d+.jpg$", x)[1] for x in image_files]
 
-for name in names(Main)
-    obj = getfield(Main, name)    
-    println("$name: ", Base.summarysize(obj), " bytes")
-end
-
 pets = DataBlock{ImgMatrix, String}(
     TransformBlock{ImgMatrix}.(images), 
     TransformBlock{String}.(image_names)
@@ -257,6 +252,19 @@ using StatsBase
 StatsBase.countmap(xx)
 
 ```
+
+check memory usage, we have three copies of the data: 
+images, pets::DataBlock, (train_db + valid_db)::DataBlock.
+
+Can we reduce memory usage by using views?
+
+```{julia}
+for name in names(Main)
+    obj = getfield(Main, name)    
+    println("$name: ", Base.summarysize(obj), " bytes")
+end
+```
+
 
 ```{julia}
 
