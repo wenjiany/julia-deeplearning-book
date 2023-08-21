@@ -11,6 +11,7 @@ Pkg.activate(".");
 using DataFrames
 using Flux
 using Images
+using ImageView
 using Measures
 using MLDatasets
 using MLUtils
@@ -20,6 +21,7 @@ using Statistics
 using CodecZlib
 using Downloads
 using Random
+using Loess
 
 import UnicodePlots
 import Tar
@@ -76,36 +78,46 @@ end
 
 ```
 
-```{julia}
-#| output: false
-#| eval: false
-
-files = readdir(img_path)
-
-```
-
-
-```{julia}
-fname = readdir(img_path)[1]
-
-image = load(joinpath(img_path, fname))
-
-
-```
 
 ```{julia}
 
-findall(str -> occursin(r"(.+)_\d+.jpg$", str), files)  ## will find the location indices
+findall(fname -> occursin(r"(.+)_\d+.jpg$", fname), files)  ## will find the location indices
 
-filter(str -> occursin(r"(.+)_\d+.jpg$", str), files) ## will return the matching values
+filter(fname -> occursin(r"(.+)_\d+.jpg$", fname), files) ## will return the matching values
+
+function get_image_files(path::String)
+    files = readdir(path)
+    return filter(fname -> occursin(r"(.+)_\d+.jpg$", fname), files)
+end
+
+image_files = get_image_files(img_path)
+
+function regexLabeller(r::Regex)
+    function _inner(o::String)
+        return String(match(r, o)[1])
+    end
+    return _inner
+end
+
+breedLabeller = regexLabeller(r"(.+)_\d+.jpg$")
+
+image_names  = breedLabeller.(image_files)
+## image_names = [match(r"^(.+)_\d+.jpg$", x)[1] for x in image_files]
+
+image = load(joinpath(img_path, image_files[1]))
+
+ImageView.imshow(image)
 
 ```
+
+According to https://www.juliapackages.com/p/fixedpointnumbers, "N0f8(aliased to Normed{UInt8,8}) is represented internally by a UInt8, and makes 0x00 equivalent to 0.0 and 0xff to 1.0."
 
 ```{julia}
 
 # Load all images
 function load_images(folder::String)
-    ## images = Vector{Array{RGB{N0f8}, 2}}()  # actually use more memory?
+    ## images = Vector{Array{RGB, 2}}()  # significantly higher memory allocation
+    ## images = Vector{Array{RGB{N0f8}, 2}}()  # similiar memory allocation as []
     images = []
     for file in readdir(folder)
         if occursin(".jpg", file)
@@ -126,7 +138,7 @@ println("Loaded $(length(images)) images.")
 
 ```
 
-Grizzly bear example
+Grizzly bear example for augmentation
 
 ```{julia}
 
@@ -150,8 +162,11 @@ blue.(image) * 255
 
 Image augmentation
 
+Based on the idea of fastai book, images are first resized to a larger 460x460 image, and moved to GPU. Then on GPU, a batched augmentation including rotation, warp and resizeing to 224x224 was performed on a minibatch of images. I am not clear how to implement this strategy in Julia at this moment.
+
 ```{julia}
 
+### python, fastai
 # x1 = x1.affine_coord(sz=224)
 # x1 = x1.rotate(draw=30, p=1.)
 # x1 = x1.zoom(draw=1.2, p=1.)
@@ -159,15 +174,19 @@ Image augmentation
 
 using Augmentor
 
-p1 = Resize(460, 460)
+p1 = Resize(460, 460) ## done on CPU, and should be moved to GPU after this transformation
 
+## p2 should be performed on GPU for the minibatch
 p2 = Rotate(-30)  |>
      Zoom(1.8) |>
      Resize(224, 224)
 
 img_new = augment(image, p1 |> p2)
 
+imshow(img_new)
+
 ```
+It is not clear how prospective warp is implemented in Julia.
 
 ```{julia}
 #| eval: false
@@ -193,6 +212,7 @@ img_new = augment(image, p1 |> p2)
 
 Define DataBlock type
 
+
 ```{julia}
 
 ### python
@@ -203,7 +223,6 @@ Define DataBlock type
 ##                  item_tfms=Resize(460),
 ##                  batch_tfms=aug_transforms(size=224, min_scale=0.75))
 
-
 ## create an alias for Matrix{RGB{N0f8}} as ImgMatrix
 const ImgMatrix = typeof(image)
 
@@ -212,51 +231,38 @@ struct TransformBlock{T}
 end
 
 imgBlock = TransformBlock{ImgMatrix}(image)
+imshow(imgBlock.item)
+
+Base.summarysize(image)
+Base.summarysize(imgBlock.item)
+### they are referening to the same memory
+imgBlock.item===image
 
 struct DataBlock{T,U}
     inputBlocks::Vector{TransformBlock{T}}
     outputBlocks::Vector{TransformBlock{U}}
 end
 
-
-function get_image_files(path::String)
-    files = readdir(path)
-    return filter(str -> occursin(r"(.+)_\d+.jpg$", str), files)
-end
-
-image_files = get_image_files(img_path)
-
-function regexLabeller(r::Regex)
-    function _inner(o::String)
-        return String(match(r, o)[1])
-    end
-    return _inner
-end
-
-breedLabeller = regexLabeller(r"(.+)_\d+.jpg$")
-
-image_names  = breedLabeller.(image_files)
-## image_names = [match(r"^(.+)_\d+.jpg$", x)[1] for x in image_files]
-
 pets = DataBlock{ImgMatrix, String}(
     TransformBlock{ImgMatrix}.(images), 
     TransformBlock{String}.(image_names)
 )
 
+### they are refering to the same thing
+pets.inputBlocks[1].item === images[1]
+
 #findall(pets.inputBlocks)
 findall(img -> size(channelview(img.item))[1] == 4, pets.inputBlocks)  ## will find the location indices
 
-xx = map(img -> size(channelview(img.item))[1], pets.inputBlocks)  ## will find the location indices
+image_channels = map(img -> size(channelview(img.item))[1], pets.inputBlocks)  ## will find the location indices
 
 using StatsBase
-StatsBase.countmap(xx)
+StatsBase.countmap(image_channels)
 
 ```
 
-check memory usage, we have three copies of the data: 
-images, pets::DataBlock, (train_db + valid_db)::DataBlock.
-
-Can we reduce memory usage by using views?
+check memory usage, we have two "copies" of the data: 
+images, pets::DataBlock.
 
 ```{julia}
 for name in names(Main)
@@ -265,6 +271,33 @@ for name in names(Main)
 end
 ```
 
+But they are not really stored as two different copies.
+
+```{julia}
+### they are refering to the same thing
+pets.inputBlocks[1].item === images[1]
+
+```
+
+GPT4 says, "In Julia, variables are just references (bindings) to values, whether those values are stored in mutable or immutable structures."
+
+```{julia}
+
+mat = Matrix{RGB{N0f8}}(undef, 2, 2)
+mat[1, 1] = RGB{N0f8}(1.0, 0, 0) # Assigning a red color to the element at position (1,1)
+imshow(mat)
+
+struct T
+    m::Matrix{RGB{N0f8}}
+end
+
+mat2 = mat
+
+t = T(mat2)
+t.m[1, 1] = RGB{N0f8}(0, 1.0, 0) # Assigning a green color to the element at position (1,1) of mat2
+imshow(mat)
+
+```
 
 ```{julia}
 
@@ -564,7 +597,7 @@ for (i, data_idx) in enumerate(pets_dl)
     lr_losses[i] = loss(x, y)
 end
 
-using Loess
+## using Loess
 
 xs = log10.(lr)
 ys = lr_losses
@@ -726,6 +759,36 @@ accuracy(valid_X, valid_Y)
 reset_params!(freezed_params, orig_params);
 accuracy(train_X[:,:,:, 1:2000], train_Y[:, 1:2000])
 accuracy(valid_X, valid_Y)
+
+```
+
+Julia uses lexical scoping...
+
+```{julia}
+
+function f1(x)
+    x + 1
+end
+
+ff = function(x)
+    f1(x)
+end
+
+ff2 = function(f1)
+    (x) -> f1(x)
+end
+
+ff2 = ff2(f1)
+
+ff(1)
+ff2(1)
+
+function f1(x)
+    x + 10
+end
+
+ff(1)
+ff2(1)
 
 ```
 
