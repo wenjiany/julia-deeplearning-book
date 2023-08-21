@@ -636,7 +636,8 @@ trainable_params
 lr_range = 10 .^ (collect(range(-6, stop=1, step=0.2) ))
 
 ## todo: add methods for reseting parameters
-lr_finder = function(params, dl::MLUtils.DataLoader, opt, lr_range)
+
+lr_finder = function(params, dl::MLUtils.DataLoader, opt, lr_range; reset_method::Union{Flux.Zygote.Params, Function}=Flux.glorot_uniform)
 
     lr = collect(lr_range)
     lr_losses = zeros(length(lr))
@@ -647,7 +648,7 @@ lr_finder = function(params, dl::MLUtils.DataLoader, opt, lr_range)
             break
         end
 
-        reset_params!(params)
+        reset_params!(params, reset_method)
 
         opt = ADAM(lr[i]) |> gpu
         
@@ -684,12 +685,26 @@ Fine tune...
 
 
 ```{julia}
+## make sure start from a fresh model
+
+model = Chain(
+    Metalhead.ResNet(18; pretrain=true).layers[1],  # Use all layers of ResNet except the last dense layer
+    Chain(
+      AdaptiveMeanPool((1, 1)),
+        MLUtils.flatten,
+        Dense(512 => n_breeds),
+    ),
+    # Dense(512, 37),  # Dense layer for number of breeds
+    softmax
+) |> gpu
+
+loss(x, y) = Flux.crossentropy(model(x), y) |> gpu
+trainable_params = Flux.params(model[2])  # Only parameters of the last Dense layer
+
+## should we redefine loss function?
+
 
 pets_dl = Flux.DataLoader((train_X, train_Y), batchsize=10, shuffle=true) |> gpu
-
-### make sure to reset the params, since it's been set to values from lr finding
-trainable_params[1] .= (Flux.glorot_uniform(size(trainable_params[1])...) |> gpu)
-trainable_params[2] .= (Flux.glorot_uniform(size(trainable_params[2])...) |> gpu)
 
 opt = ADAM(0.001) |> gpu
 
@@ -699,17 +714,17 @@ for epoch = 1:epochs
     Flux.train!(loss, trainable_params, pets_dl, opt, cb = evalcb)
 end
 
+accuracy(train_X[:,:,:,1:2000], train_Y[:, 1:2000])
 accuracy(valid_X, valid_Y)
 
 ### unfreeze, train all parameters
+### probably not working right
 
 orig_params = deepcopy(Flux.params(model));
 
-lr_range = 10 .^ (collect(range(-7, stop=3, step=0.2) ))
+lr_range = 10 .^ (collect(range(-7, stop=-2, step=0.2) ))
 
-## doesn't work right, need to reset to pretrained params instead of randomly assigning all params
-
-best_lr, lr_losses, lr_plot = lr_finder(Flux.params(model), pets_dl, Adam(0.001), lr_range)
+best_lr, lr_losses, lr_plot = lr_finder(Flux.params(model), pets_dl, Adam(0.001), lr_range; reset_method=orig_params)
 lr_plot
 best_lr
 
@@ -725,6 +740,7 @@ accuracy(train_X[:,:,:, 1:2000], train_Y[:, 1:2000])
 
 accuracy(valid_X, valid_Y)
 
+reset_params!(Flux.params(model), orig_params);
 
 ```
 
