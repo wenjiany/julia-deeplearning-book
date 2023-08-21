@@ -449,7 +449,6 @@ Simplify the above code in order to use GPU, and not use custom types
 
 ```{julia}
 
-
 pet_labels = sort(unique(image_names))
 n_breeds = length(pet_labels)
 
@@ -709,16 +708,14 @@ model = Chain(
         MLUtils.flatten,
         Dense(512 => n_breeds),
     ),
-    # Dense(512, 37),  # Dense layer for number of breeds
     softmax
 ) |> gpu
 
-loss(x, y) = Flux.crossentropy(model(x), y) |> gpu
+## no need to redefine loss funciton
+# loss(x, y) = Flux.crossentropy(model(x), y) |> gpu
+
 trainable_params = Flux.params(model[2])  # Only parameters of the last Dense layer
-freezed_params = Flux.params(model[1])  # Only parameters of the last Dense layer
-
-## should we redefine loss function?
-
+freezed_params = Flux.params(model[1])  # Pretrained parameters
 
 pets_dl = Flux.DataLoader((train_X, train_Y), batchsize=10, shuffle=true) |> gpu
 
@@ -727,8 +724,10 @@ opt = ADAM(0.001) |> gpu
 epochs=3
 for epoch = 1:epochs
     println("Epoch: $epoch")
-    Flux.train!(loss, trainable_params, pets_dl, opt, cb = evalcb)
+    Flux.train!(loss, trainable_params, pets_dl, opt)
 end
+
+loss(train_X[:, :, :, 1:100], train_Y[:, 1:100])
 
 accuracy(train_X[:,:,:,1:2000], train_Y[:, 1:2000])
 accuracy(valid_X, valid_Y)
@@ -736,29 +735,75 @@ accuracy(valid_X, valid_Y)
 ### unfreeze, train all parameters
 ### probably not working right
 
-# orig_params = deepcopy(Flux.params(model));
 orig_params = deepcopy(freezed_params);
+orig_trainable = deepcopy(trainable_params)
+
+x1a = model(train_X[:, :, :, 1:10])
 
 lr_range = 10 .^ (collect(range(-7, stop=-2, step=0.2) ))
 best_lr, lr_losses, lr_plot = lr_finder(freezed_params, pets_dl, Adam(0.001), lr_range; reset_method=orig_params)
 lr_plot
 best_lr
 
-opt = ADAM(best_lr) |> gpu
+loss(train_X[:, :, :, 1:100], train_Y[:, 1:100])
+
+accuracy(train_X[:,:,:, 1:2000], train_Y[:, 1:2000])
+accuracy(valid_X, valid_Y)
+
+reset_params!(freezed_params, orig_params);
+
+x1b = model(train_X[:, :, :, 1:10])
+
+## not exactly the same...
+hcat(x1a[:,2], x1b[:,2])
+
+all([all(freezed_params[i] .== orig_params[i]) for i in 1:length(orig_params)])
+all([all(trainable_params[i] .== orig_trainable[i]) for i in 1:length(orig_trainable)])
+
+loss(train_X[:, :, :, 1:100], train_Y[:, 1:100])
+
+accuracy(train_X[:,:,:, 1:2000], train_Y[:, 1:2000])
+accuracy(valid_X, valid_Y)
+
+opt = ADAM(10^(best_lr - 0.5)) |> gpu
 
 reset_params!(freezed_params, orig_params);
 
 for epoch = 1:epochs
     println("Epoch: $epoch")
-    Flux.train!(loss, Flux.params(model), pets_dl, opt, cb = evalcb)
+    ##    Flux.train!(loss, Flux.params(model), pets_dl, opt, cb = evalcb)
+
+    Flux.train!(loss, freezed_params, pets_dl, opt, cb = evalcb)
 end
 
+loss(train_X[:, :, :, 1:100], train_Y[:, 1:100])
+
 accuracy(train_X[:,:,:, 1:2000], train_Y[:, 1:2000])
 accuracy(valid_X, valid_Y)
 
+all([trainable_params[i] == orig_trainable[i] for i in 1:length(trainable_params)])
+all([freezed_params[i] == orig_params[i] for i in 1:length(freezed_params)])
+
+### not resetting correctly ... could be some bug in reset_params! function, probably parameters are not lined up...
+### or Flux.train! is altering some stuff in the model used for predicting
+new_params = deepcopy(freezed_params)
+
 reset_params!(freezed_params, orig_params);
+
+loss(train_X[:, :, :, 1:100], train_Y[:, 1:100])
+
 accuracy(train_X[:,:,:, 1:2000], train_Y[:, 1:2000])
 accuracy(valid_X, valid_Y)
+
+reset_params!(freezed_params, new_params);
+
+loss(train_X[:, :, :, 1:100], train_Y[:, 1:100])
+
+accuracy(train_X[:,:,:, 1:2000], train_Y[:, 1:2000])
+accuracy(valid_X, valid_Y)
+
+[maximum(abs.(new_params[i].-orig_params[i])) for i in 1:length(orig_params)]
+[maximum(abs.(trainable_params[i].-orig_trainable[i])) for i in 1:length(orig_trainable)]
 
 ```
 
