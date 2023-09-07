@@ -1,0 +1,513 @@
+# Chapter 5: Image Classification
+
+This chapter covers image classification! Before we get started, let's make sure we have all the packages we need. In keeping with Good Julia Hygeine, we'll be using the `Project.toml` and `Manifest.toml` files to make sure we have the same versions of the packages as the rest of the book. We can do this by calling `Pkg.activate()` and `Pkg.instantiate()`.
+
+```{julia}
+import Pkg
+## Pkg.activate(joinpath(@__DIR__, ".."))
+Pkg.activate(".")
+```
+
+#```{julia}
+Pkg.add([
+    "FastAI",
+##    "FastVision",
+    "Images",
+    "Tar", 
+    "CodecZlib",
+    "FileIO",
+    "ImageTransformations",
+    "DataAugmentation",
+    "Metalhead",
+    "cuDNN",
+    "DataFrames",
+    "FluxTraining",
+    "ThreadsX",
+])
+#```
+
+
+## Downloading the pets dataset
+
+If you're following along with Python book, you can find the pet dataset at
+
+`https://s3.amazonaws.com/fast-ai-imageclas/oxford-iiit-pet.tgz`
+
+Alternatively, if you want to be a cool Julia person, you can download the dataset with
+
+```{julia}
+# The Downloads module is part of the Julia standard library
+# and provides a cross-platform way of downloading files from 
+#############################################################################################################################################
+#                                                                                                                                           #
+#                                                                                                                                           #
+# ,---------. .---.  .---.     .-''-.          .-./`) ,---.   .--.,---------.    .-''-.  .-------.    ,---.   .--.    .-''-. ,---------.    #
+# \          \|   |  |_ _|   .'_ _   \         \ .-.')|    \  |  |\          \ .'_ _   \ |  _ _   \   |    \  |  |  .'_ _   \\          \   #
+#  `--.  ,---'|   |  ( ' )  / ( ` )   '        / `-' \|  ,  \ |  | `--.  ,---'/ ( ` )   '| ( ' )  |   |  ,  \ |  | / ( ` )   '`--.  ,---'   #
+#     |   \   |   '-(_{;}_). (_ o _)  |         `-'`"`|  |\_ \|  |    |   \  . (_ o _)  ||(_ o _) /   |  |\_ \|  |. (_ o _)  |   |   \      #
+#     :_ _:   |      (_,_) |  (_,_)___|         .---. |  _( )_\  |    :_ _:  |  (_,_)___|| (_,_).' __ |  _( )_\  ||  (_,_)___|   :_ _:      #
+#     (_I_)   | _ _--.   | '  \   .---.         |   | | (_ o _)  |    (_I_)  '  \   .---.|  |\ \  |  || (_ o _)  |'  \   .---.   (_I_)      #
+#    (_(=)_)  |( ' ) |   |  \  `-'    /         |   | |  (_,_)\  |   (_(=)_)  \  `-'    /|  | \ `'   /|  (_,_)\  | \  `-'    /  (_(=)_)     #
+#     (_I_)   (_{;}_)|   |   \       /          |   | |  |    |  |    (_I_)    \       / |  |  \    / |  |    |  |  \       /    (_I_)      #
+#     '---'   '(_,_) '---'    `'-..-'           '---' '--'    '--'    '---'     `'-..-'  ''-'   `'-'  '--'    '--'   `'-..-'     '---'      #
+#                                                                                                                                           #
+#                                                                                                                                           #
+#############################################################################################################################################
+using Downloads
+url = "https://s3.amazonaws.com/fast-ai-imageclas/oxford-iiit-pet.tgz"
+
+# Download the file if we don't already have data/pets, which is where
+# we'll be putting the data
+if !isdir("data/pets") || length(readdir("data/pets/")) == 0
+    # Downloads.download will download the file at the given url
+    # and save it to the given filename ("oxford-iiit-pet.tgz")
+    !isdir("data/downloads") && mkpath("data/downloads")
+    outdir = "data/downloads/oxford-iiit-pet.tgz"
+    Downloads.download(url, outdir)
+else
+    @info "Already have data/pets, skipping download"
+end
+```
+
+Now we can unzip the file with
+
+```{julia}
+using Tar, CodecZlib
+
+# This will put the result into data/pets.
+# Only unzips if the folder (data/pets) doesn't already exist
+pet_path = "data/pets"
+if !isdir(pet_path)
+    mkpath(pet_path)
+    open(outdir, read=true) do stream
+        # Un-gzip with GzipDecompressorStream
+        io = GzipDecompressorStream(stream)
+
+        # Extract the tar file into data/pets
+        Tar.extract(io, pet_path)
+
+        # Move the stuff inside data/pets/oxford-iiit-pet out to data/pets
+        mv(
+            joinpath(pet_path, "oxford-iiit-pet", "images"), 
+            joinpath(pet_path, "images")
+        )
+        mv(
+            joinpath(pet_path, "oxford-iiit-pet", "annotations"), 
+            joinpath(pet_path, "annotations")
+        )
+    end
+
+    # Remove the empty folder
+    rm(joinpath(pet_path, "oxford-iiit-pet"))
+end
+```
+
+The data we get is in a folder format, with a folder for each class of pet. We can see the classes with
+
+```{julia}
+# Get the list of folders in the pet_path directory
+types = readdir(pet_path)
+display(types)
+```
+
+As Jeremy notes, the [website](https://www.robots.ox.ac.uk/~vgg/data/pets/) mentions that the `images` folder contains raw, flagged images of what the pets _are_ where as the `annotations` folder contains the bounding boxes for the pets.
+
+To get a sense of the data, let's load it up and print out a few examples.
+
+```{julia}
+using MLUtils
+
+pet_path = joinpath(pet_path, "oxford-iiit-pet")
+
+# List the first few images in `images`
+img_paths = readdir(joinpath(pet_path, "images"), join=true)
+
+# The dataset also contains .mat file for silly matlab people,
+# so lets filter those out. We want only .jpg files.
+filter!(x -> endswith(x, ".jpg"), img_paths)
+```
+
+::: {.callout-warning}
+
+Some of our images are corrupt, so we'll need to filter those out. We can do this by checking if the image is loadable with `FileIO.load`.
+
+```{julia}
+using FileIO, Images
+
+# function loadable(path)
+#     try
+#         FileIO.load(path)
+#         return true
+#     catch e
+#         println("Error loading $path: $e")
+#         return false
+#     end
+# end
+
+# # Filter out the invalid images
+# filter!(loadable, img_paths)
+```
+
+:::
+
+```{julia}
+# Split paths into training and validation sets
+train_paths, val_paths = MLUtils.splitobs(img_paths, at=0.8, shuffle=true)
+
+# Print out 5 random paths
+display(rand(train_paths, 5))
+```
+
+Note that the images contain the target class in the filename, so we can use that to get the class of each image. For example, one file is called `shiba_inu_107.jpg`, so we know that its class is `shiba_inu`. Let's write a regular expression to extract the class from the filename. Don't worry if the regular expression seems arcane to you, regular expressions are a dark art best left to language models and nerds.
+
+```{julia}
+# Extract the class from the filename using a regular expression.
+# We want to get the part of the filename before the last underscore
+# and after the last slash
+class_regex = r"\/([^\/]+)_\d+\.jpg$"
+get_label(path) = String(match(class_regex, path).captures[1])
+
+# Get the class of each image
+all_classes = map(get_label, img_paths)
+unique_classes = unique(all_classes)
+```
+
+We can however make this a little more structured. We can create a `PetImage` struct that contains the path to the image and the class of the image. This will make it easier to pass around the data.
+
+::: {.callout-tip}
+## Aside: Wrapping this up into a struct
+
+We're going to be doing a lot of work with this dataset, so let's wrap it up into a struct so we can pass it around easily. One thing I'd like to do is to make the image loading _lazy_, so that we don't load the image until we need it. We can do this by wrapping the image path in a struct and then defining a few methods that will load the image when we need it.
+
+```{julia}
+# Import the Images and FileIO packages, we'll need these to load up
+# images from the filesystem
+using Images, FileIO
+
+struct PetImage
+    path::String
+    class::String
+end
+
+# Convenience constructor that infers the class from the path
+PetImage(path::String) = PetImage(path, match(class_regex, path).captures[1])
+
+# Convert to RGB because some images are RGBA
+image(p::PetImage) = convert.(RGB, load(p.path))
+
+# Display methods that wrap around the image function
+Base.display(p::PetImage) = display(image(p))
+Base.display(io, p::PetImage) = display(io, image(p))
+```
+
+Let's elaborate a bit more on the code in the cell above.
+
+- We define a new struct called `PetImage` that has two fields: `path` and `class`. The `path` field is the path to the image on disk, and the `class` field is the class of the image. We can create a new `PetImage` by calling `PetImage(path, class)`.
+- We define a new constructor for `PetImage` that takes only the path and infers the class from the path. This is useful because we don't want to have to specify the class every time we create a new `PetImage`.
+- We define a new method for `display` that will display the image when we call `display` on a `PetImage`. This is useful because we don't want to have to call `load` every time we want to display an image -- sometimes we just want to see the image, and we don't care about the underlying data.
+- The `image` function is a convenience function that will load the image from disk. This is useful because we don't want to have to call `load` every time we want to get the image data.
+
+Here's an example of how we can construct a `PetImage` and display it:
+
+```{julia}
+PetImage(img_paths[1])
+```
+
+Finally, let's add a convenience function to retrieve a tuple of the image and class from a `PetImage`:
+
+```{julia}
+using ThreadsX
+using DataAugmentation, Flux
+using DataAugmentation: FromOrigin, FromCenter, FromRandom, Crop, apply
+
+const DATA_MEAN = (0.485, 0.456, 0.406)
+const DATA_STD = (0.229, 0.224, 0.225)
+
+sz = 64
+## sz = 224
+newsize = (sz, sz)
+
+```
+
+```{julia}
+
+flatten_alpha(m) = m[:, :, 1:3,:]
+
+function getitem(p)
+    # Using ThreadsX.map to parallelize the loading of images
+    im = ThreadsX.map(image, p)
+
+    # Set the transformations to use. 
+    #
+    # need to use CenterResizeCrop instead of CenterCrop
+    ## tnfm = CenterResizeCrop(newsize)
+    tnfm = CenterCrop(newsize)
+        ImageToTensor() |>
+        Normalize(DATA_MEAN, DATA_STD)
+
+    # Apply to the image
+    data = channelview.(itemdata.(apply(tnfm, Image.(im))))
+
+    # Lastly, unsqueeze the data to add a batch dimension
+    # and permute the dimensions to put the channels in the third spot.
+    # I.e. the matrices change from (C, H, W) to (H, W, C, B)
+    # where C is the number of channels, H is the height, W is the width, 
+    # and B is the batch size.
+    data = map(x -> permutedims(Flux.unsqueeze(Float32.(x), 4), [2,3,1,4]), data)
+
+    # Remove the alpha channel (channel 4) if present
+    data = map(flatten_alpha, data)
+
+    return (
+        cat(map(m -> Float32.(m), data)..., dims=4), 
+        Flux.onehotbatch(getproperty.(p, :class), unique_classes)
+    )
+end
+
+# call it on a sample of paths
+x, y = getitem(
+    PetImage.(train_paths[1:5])
+)
+```
+
+
+We can reconstruct these smaller images for viewing if you're curious:
+```{julia}
+# This function converts a matrix into an image
+function mat2img(mat)
+    # Squish the third dimension into RGB
+    return mapslices(x -> RGB(x...), N0f16.(mat), dims=3)[:,:,1]
+end
+
+mat2img(x[:, :, :, 2])
+```
+
+
+Finally, we can construct our training and validation datasets:
+
+```{julia}
+# Eager
+d_train, d_valid = getitem(PetImage.(train_paths)), getitem(PetImage.(val_paths))
+
+# Lazy
+# d_train, d_valid = mapobs(getitem, PetImage.(train_paths)), mapobs(getitem, PetImage.(val_paths))
+
+# Set a batch size
+batchsize = 8
+
+# Creat the dataloaders
+train = DataLoader(d_train, batchsize=batchsize, shuffle=true) |> gpu
+valid = DataLoader(d_valid, batchsize=batchsize, shuffle=true) |> gpu
+```
+
+:::
+
+
+## Processing images
+
+The image processing code here is adapted from a [Metalhead.jl tutorial](https://fluxml.ai/Metalhead.jl/dev/tutorials/pretrained/).
+
+```{julia}
+using Metalhead, Flux
+## using FastVision
+
+resnet = ResNet(18; pretrain = true);
+
+# Get backbone and head:
+backbone = resnet.layers[1]#[1:end-1]
+h, w, ch, b = Flux.outputsize(backbone, (sz, sz, 3, batchsize))
+## head = FastVision.Models.visionhead(ch, length(unique_classes))
+
+n_breeds = 37
+
+head = Chain(
+      AdaptiveMeanPool((1, 1)),
+        MLUtils.flatten,
+        Dense(512 => n_breeds),     # Dense(512, 37), Dense layer for number of breeds
+      softmax)
+
+head = Chain(
+      AdaptiveMeanPool((1, 1)),
+        MLUtils.flatten,
+        Dense(512 => n_breeds),     # Dense(512, 37), Dense layer for number of breeds
+      )  ### no softmax, use logitcrossentropy
+
+
+# Set up model:
+model = Chain(
+    backbone,
+    head
+) |> gpu;
+
+```
+
+::: {.callout-tip}
+
+You can access the original 1000 ResNet labels with
+
+```julia
+# ImageNet labels
+labnvvels = readlines(
+    Downloads.download("https://raw.githubusercontent.com/pytorch/hub/master/imagenet_classes.txt")
+)
+```
+
+:::
+
+<!-- ```{julia}
+for (x, y) in train
+    predvals = model(x)
+    y_hat = Flux.onecold(predvals, unique_classes)
+    @info "" Flux.onecold(y, unique_classes) y_hat
+end
+``` -->
+
+```{julia}
+# using DataFrames
+# DataFrame(
+#     predicted = pred,
+#     actual = classes[1:5]
+# )
+```
+
+```{julia}
+using FastAI
+using FluxTraining
+
+# Set up loss function, optimizer, callbacks, and learner:
+lossfn = Flux.Losses.logitcrossentropy |> gpu
+## lossfn = Flux.Losses.crossentropy
+
+optimizer = Flux.Adam()
+callbacks = [ToGPU(), Metrics(accuracy)]
+learner = Learner(
+    model, (train, valid),
+    optimizer, lossfn,
+    callbacks...
+)
+
+# Train for 5 epochs:
+@info "Training"
+finetune!(learner, 10)
+
+```
+
+
+```{julia}
+
+
+logitcrossentropy
+agg(-sum(y .* logsoftmax(ŷ; dims); dims))
+
+crossentropy
+agg(-sum(y .* log.(ŷ .+ ϵ); dims))
+
+yy = Flux.onecold(d_valid[2][:,1:10], unique_classes);
+
+hcat(val_paths[1:10], yy)
+
+using ImageView
+
+ImageView.imshow(mat2img(d_valid[1][:,:,:,9]))
+
+yt = Flux.onecold(d_train[2][:,1:10], unique_classes);
+
+hcat(train_paths[1:10], yt)
+
+ImageView.imshow(mat2img(d_train[1][:,:,:,10]))
+
+```
+
+```{julia}
+
+pet_labels = unique_classes
+n_breeds = length(pet_labels)
+
+model = Chain(
+    Metalhead.ResNet(18; pretrain=true).layers[1],  # Use all layers of ResNet except the last dense layer
+    Chain(
+      AdaptiveMeanPool((1, 1)),
+        MLUtils.flatten,
+        Dense(512 => n_breeds),     # Dense(512, 37), Dense layer for number of breeds
+    ),
+    softmax
+) |> gpu
+
+loss(x, y) = Flux.crossentropy(model(x), y) |> gpu
+
+### seems to be more flexible to pass model as a parameter...
+## loss(m, x, y) = Flux.crossentropy(m(x), y) |> gpu
+
+# loss(x, y) = Flux.Losses.logitcrossentropy(model(x), y) |> gpu
+
+##onecold(model(train_X[:, :, :, 10:11]), pet_labels)
+
+### model refer to the model defined earlier in global scope
+my_accuracy(x, y) = mean(Flux.onecold(model(x), unique_classes) .== Flux.onecold(y, unique_classes)) |> gpu
+
+## println("Accuracy: ", accuracy(train_X[:,:,:,1:20], train_Y[:, 1:20]))
+
+evalcb = () -> @show(loss(train_X[:,:,:,1:100], train_Y[:, 1:100])) |> gpu
+
+trainable_params = Flux.params(model[2])  # Only parameters of the last Dense layer
+
+opt = ADAM(0.001) |> gpu
+
+# train_X, train_Y = d_train |> gpu
+## pets_dl = Flux.DataLoader((train_X, train_Y), batchsize=12, shuffle=true) |> gpu
+
+d_train = d_train |> gpu
+d_valid = d_valid |> gpu
+
+pets_dl = Flux.DataLoader(d_train, batchsize=10, shuffle=true) |> gpu
+
+epochs = 10
+
+for epoch = 1:epochs
+    println("Epoch: $epoch")
+##     Flux.train!(loss, Flux.params(model), dataset, opt, cb = throttle(evalcb, 10))
+
+##    Flux.train!(loss, trainable_params, pets_dl, opt, cb = evalcb)
+##    Flux.train!(loss, trainable_params, pets_dl, opt)
+    Flux.train!(loss, trainable_params, pets_dl, opt)
+end
+
+##
+
+using Statistics
+
+d_train = d_train |> gpu
+d_valid = d_valid |> gpu
+
+my_accuracy(x, y) = mean(Flux.onecold(model(x), unique_classes) .== Flux.onecold(y, unique_classes)) |> gpu
+
+my_accuracy(x, y) = mean(Flux.onecold(Flux.softmax(model(x), unique_classes)) .== Flux.onecold(y, unique_classes)) |> gpu
+
+my_accuracy(d_train[1][:,:,:,1:200], d_train[2][:,1:200])
+
+my_accuracy(d_valid[1][:,:,:,1:200], d_valid[2][:,1:200])
+
+yy = Flux.onecold(d_valid[2], unique_classes);
+
+yp = Flux.onecold(model(d_valid[1][:,:,:,1:200]), unique_classes);
+
+hcat(val_paths[1:200], yy[1:200], yp)
+
+sum(yp .== yy[1:200])
+
+yy = Flux.onecold(d_train[2], unique_classes);
+
+yp = Flux.onecold(model(d_train[1][:,:,:,1:200]), unique_classes);
+
+hcat(train_paths[1:200], yy[1:200], yp)
+
+###
+
+using Statistics
+
+my_accuracy(d_train[1][:,:,:,1:200], d_train[2][:,1:200])
+
+my_accuracy(d_valid[1][:,:,:,1:200], d_valid[2][:,1:200])
+
+```
+
