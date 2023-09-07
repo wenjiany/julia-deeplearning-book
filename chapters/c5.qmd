@@ -515,18 +515,29 @@ for epoch = 1:epochs
     println("Epoch: $epoch")
 ##     Flux.train!(loss, Flux.params(model), dataset, opt, cb = throttle(evalcb, 10))
 
-    Flux.train!(loss, trainable_params, pets_dl, opt, cb = evalcb)
+##    Flux.train!(loss, trainable_params, pets_dl, opt, cb = evalcb)
+    Flux.train!(loss, trainable_params, pets_dl, opt)
 end
 
 accuracy(train_X[:,:,:, 101:200], train_Y[:, 101:200])
 
+accuracy(valid_X, valid_Y)
+
+```
+
+```{julia}
+
 ## xx = Flux.glorot_uniform(size(layer_to_reset[3].weight)...) |> gpu
 ## layer_to_reset[3].weight .= xx
 
-trainable_params[1] .= (Flux.glorot_uniform(size(trainable_params[1])...) |> gpu)
-trainable_params[2] .= (Flux.glorot_uniform(size(trainable_params[2])...) |> gpu)
+## reset trainable_params to be uniform
 
-accuracy(train_X[:,:,:, 101:200], train_Y[:, 101:200])
+# trainable_params[1] .= (Flux.glorot_uniform(size(trainable_params[1])...) |> gpu)
+# trainable_params[2] .= (Flux.glorot_uniform(size(trainable_params[2])...) |> gpu)
+
+# accuracy(train_X[:,:,:, 101:200], train_Y[:, 101:200])
+
+# accuracy(valid_X, valid_Y)
 
 ## doesn't work
 ## trainable_params[1] .= (Flux.glorot_uniform(size(trainable_params[1])...))
@@ -544,7 +555,7 @@ for epoch = 1:epochs
     println("Epoch: $epoch")
     
     for (i, data_idx) in enumerate(pets_dl)
-        print(i)
+        ## print(i)
         data =[(train_X[:, :, :, data_idx], train_Y[:, data_idx])];
 
        ##  Flux.train!(loss, trainable_params, data, opt)
@@ -561,6 +572,8 @@ end
 accuracy(train_X[:,:,:, 101:200], train_Y[:, 101:200])
 
 accuracy(train_X, train_Y)
+
+accuracy(valid_X, valid_Y)
 
 ```
 
@@ -804,6 +817,46 @@ accuracy(valid_X, valid_Y)
 
 [maximum(abs.(new_params[i].-orig_params[i])) for i in 1:length(orig_params)]
 [maximum(abs.(trainable_params[i].-orig_trainable[i])) for i in 1:length(orig_trainable)]
+
+```
+
+Try FastAI.jl
+
+```{julia}
+
+using FastAI
+
+## make sure start from a fresh model
+
+model = Chain(
+    Metalhead.ResNet(18; pretrain=true).layers[1],  # Use all layers of ResNet except the last dense layer
+    Chain(
+      AdaptiveMeanPool((1, 1)),
+        MLUtils.flatten,
+        Dense(512 => n_breeds),
+        softmax
+    )
+) |> gpu
+
+pets_dl = Flux.DataLoader((train_X, train_Y), batchsize=10, shuffle=true) |> gpu
+
+# Set up loss function, optimizer, callbacks, and learner:
+lossfn = Flux.Losses.logitcrossentropy
+
+lossfn = loss
+
+## lossfn = Flux.Losses.crossentropy
+optimizer = Flux.Adam()
+callbacks = [ToGPU(), Metrics(accuracy)]
+learner = Learner(
+    model, pets_dl,
+    optimizer, lossfn,
+    callbacks...
+)
+
+# Train for 5 epochs:
+@info "Training"
+finetune!(learner, 2, base_lr=0.003)
 
 ```
 
